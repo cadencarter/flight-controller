@@ -199,14 +199,14 @@ function openStream() {
 openStream();
 
 let escBusy = false, lightBusy = false, rebooting = false, connected = false;
-// Starts disarmed; the firmware has no arm-state readback.
+// Starts disarmed until the controller's "escState" event says otherwise.
 let armState = false;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function request(path, timeout = 2500) {
+async function request(path, timeout = 2500, method = "GET") {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeout);
   try {
-    const r = await fetch(path, {cache:"no-store", signal:ctl.signal});
+    const r = await fetch(path, {method, cache:"no-store", signal:ctl.signal});
     if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(t || "HTTP " + r.status); }
     return await r.text();
   } finally { clearTimeout(timer); }
@@ -261,7 +261,7 @@ $("esc").addEventListener("click", async () => {
   if (want && !window.confirm("Arm ESCs and enable motor output?")) return;
   escBusy = true; $("esc").setAttribute("aria-busy", "true"); $("esc-msg").textContent = "";
   setEsc(want); // flip right away so the animation feels instant
-  try { await request(want ? "/esc/arm" : "/esc/disarm"); }
+  try { await request(want ? "/esc/arm" : "/esc/disarm", 2500, "POST"); }
   catch (e) { setEsc(!want); $("esc-msg").textContent = (e && e.name !== "AbortError" && e.message) ? e.message : "Command unconfirmed. Switch left unchanged."; }
   finally { escBusy = false; $("esc").removeAttribute("aria-busy"); controls(); }
 });
@@ -276,7 +276,7 @@ $("reboot").addEventListener("click", async () => {
   $("reboot").textContent = "Rebooting…"; $("reboot-msg").textContent = "Waiting for the controller to restart…";
   $("reboot-msg").classList.add("ok");
   connection(false);
-  try { await request("/reboot", 3000); } catch (_) { /* A restart may interrupt the reply. */ }
+  try { await request("/reboot", 3000, "POST"); } catch (_) { /* A restart may interrupt the reply. */ }
   const start = Date.now(); let back = false;
   // Wait for it to drop off the network first (up to 5 s) so a slow shutdown isn't mistaken for a finished reboot.
   while (Date.now() - start < 5000 && await alive()) await sleep(300);
@@ -784,6 +784,13 @@ function parseHealth(data, key) {   // "env: OK (3200 ms since last)", "ai: WAIT
   renderModules();
 }
 onStream("envHealth", e => { noteAlive(); parseHealth(e.data, "env"); });
+onStream("escState", e => {   // "ARMED" / "DISARMED": the controller's real arm state
+  noteAlive();
+  if (escBusy) return;
+  const on = String(e.data).trim().toUpperCase() === "ARMED";
+  if (armState && !on) $("esc-msg").textContent = "Controller disarmed (failsafe or another client).";
+  if (on !== armState) setEsc(on);
+});
 onStream("aiHealth",  e => { noteAlive(); parseHealth(e.data, "ai"); });
 onStream("aiData", e => {   // optional, "dx: 1.5, dy: -0.8": the correction the AI module just reported
   noteAlive();

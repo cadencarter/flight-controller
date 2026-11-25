@@ -209,6 +209,7 @@ void setupIMU() {
   }
   imuOk = enableIMUReports();
   if (!imuOk) Serial.println("!! BNO085 report enable failed - arming is disabled !!");
+  bno08x.wasReset();   // clear the power-on reset flag so readIMU() only reports real resets
 }
 // ---------------- BNO085 setup ----------------
 
@@ -388,12 +389,12 @@ static void cmdLevel(int, char **) {
   Serial.printf("Level captured. To make it permanent set:\n#define ROLL_TRIM  %.2ff\n#define PITCH_TRIM %.2ff\n",
                 rollTrim, pitchTrim);
 }
+// The sensor is enabled once in setup(). Enabling/disabling it on every read raced
+// between the web task and the CLI task (one could disable it mid-read of the other).
 static int getTemp() {
-  temperature_sensor_enable(temp_handle);
   float tsens_out = 0;
-  temperature_sensor_get_celsius(temp_handle, &tsens_out);
-  temperature_sensor_disable(temp_handle);
-  return round(tsens_out);
+  if (!temp_handle || temperature_sensor_get_celsius(temp_handle, &tsens_out) != ESP_OK) return 0;
+  return (int)lroundf(tsens_out);
 }
 // ---------------- External Control ----------------
 
@@ -618,7 +619,9 @@ void setup() {
   Serial.begin(115200);
   setupESC();     // ESC signal first, so the ESCs see a valid pulse as early as possible
   setupIMU();
-  temperature_sensor_install(&temp_sensor_config, &temp_handle);
+  if (temperature_sensor_install(&temp_sensor_config, &temp_handle) == ESP_OK)
+    temperature_sensor_enable(temp_handle);
+  else temp_handle = NULL;
 
   // Notify user drone is ready:
   setupTune();
