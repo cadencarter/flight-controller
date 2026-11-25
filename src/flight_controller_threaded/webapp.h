@@ -9,6 +9,7 @@
 //#include "commands.h"
 #include "index_html.h"
 #include "mon_struts.h"
+#include "esp_heap_caps.h"
 
 // ---- WiFi Settings ---- //
 #define USE_ACCESS_POINT true 
@@ -182,10 +183,13 @@ bool getAiCorrection(float *dx, float *dy, uint32_t *ageMs) {
   return true;
 }
  
-static String moduleStatus(HealthModule m) {
-  if (!modHealth[m].everSeen) return "WAITING (no contact yet)";
+// Formats "<label>: <status>" into out. Stack buffer, no heap (String concatenation
+// every 2.5 s churned the heap and fragmented it over long sessions).
+static void moduleStatus(char *out, size_t len, const char *label, HealthModule m) {
+  if (!modHealth[m].everSeen) { snprintf(out, len, "%s: WAITING (no contact yet)", label); return; }
   uint32_t age = millis() - modHealth[m].lastSeen;
-  return String(age > MODULE_TIMEOUT_MS ? "TIMEOUT" : "OK") + " (" + String(age) + " ms since last)";
+  snprintf(out, len, "%s: %s (%lu ms since last)", label,
+           age > MODULE_TIMEOUT_MS ? "TIMEOUT" : "OK", (unsigned long)age);
 }
 // ------------------------------ //
 
@@ -202,6 +206,8 @@ extern volatile bool armed;
 bool requestArm();
 void requestDisarm(const char *why);
 const char *lastArmRefusal();
+void logEvent(const char *fmt, ...);
+static int getTemp();
 
 // new below
 #define PRESS_MS 150 // try 100-300 if the lamp doesn't respond
@@ -241,26 +247,55 @@ void reboot(AsyncWebServerRequest *request){
   delay(200);   // let the reply go out first
   ESP.restart();
 }
+// ---- Heap watch ---- //
+// Every status tick, compare free internal heap against the value 60 s after boot.
+// A real leak shows up here as a steady downward trend; it is logged (always, not
+// only in debug mode) each time another HEAP_LEAK_STEP bytes have gone missing.
+#define HEAP_BASELINE_MS  60000
+#define HEAP_LEAK_STEP    8192
+#define HEAP_LOW_BYTES    32768
+static void heapWatch() {
+  static uint32_t baseline = 0, reported = 0;
+  static bool lowWarned = false;
+  uint32_t freeNow  = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  uint32_t largest  = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  if (!baseline) {
+    if (millis() >= HEAP_BASELINE_MS) baseline = reported = freeNow;
+    return;
+  }
+  if (reported > freeNow && reported - freeNow >= HEAP_LEAK_STEP) {
+    reported = freeNow;
+    logEvent("[heap] free %lu B (down %lu B since baseline), largest block %lu B",
+             (unsigned long)freeNow, (unsigned long)(baseline - freeNow), (unsigned long)largest);
+  }
+  if (!lowWarned && freeNow < HEAP_LOW_BYTES) {
+    lowWarned = true;
+    logEvent("[heap] LOW: only %lu B free", (unsigned long)freeNow);
+  }
+}
+
 void systemStatus(){
-  String temp_str = "temp: " + String(getTemp());
-  const char *temp = temp_str.c_str();  
+  heapWatch();
+  if (events.count() == 0) return;   // nobody listening: don't queue anything
 
-  String att_str = "att1: " + String(attachmentName(attachments[0])) + ", att2: " + String(attachmentName(attachments[1]));
-  events.send(att_str.c_str(), "attachments", millis());
+  char msg[96];
+  snprintf(msg, sizeof msg, "att1: %s, att2: %s", attachmentName(attachments[0]), attachmentName(attachments[1]));
+  events.send(msg, "attachments", millis());
 
-  String env_str = "env: " + moduleStatus(HM_ENV);
-  events.send(env_str.c_str(), "envHealth", millis());
- 
-  String grove_str = "grove: " + moduleStatus(HM_GROVE);
-  events.send(grove_str.c_str(), "groveHealth", millis());
+  moduleStatus(msg, sizeof msg, "env", HM_ENV);
+  events.send(msg, "envHealth", millis());
+  moduleStatus(msg, sizeof msg, "grove", HM_GROVE);
+  events.send(msg, "groveHealth", millis());
+  moduleStatus(msg, sizeof msg, "portenta", HM_PORTENTA);
+  events.send(msg, "portentaHealth", millis());
 
-  String portenta_str = "portenta: " + moduleStatus(HM_PORTENTA);
-  events.send(portenta_str.c_str(), "portentaHealth", millis());
+  snprintf(msg, sizeof msg, "temp: %d", getTemp());
+  events.send(msg, "temperature", millis());
 
-  events.send(temp, "temperature", millis());
-  for (int j = 0; j < system_monitor_get_lines(buf, sizeof buf, lines, SYSMON_MAX_LINES); j++){ 
-      events.send(lines[j], "monitoringData", millis());
-    }
+  // Format once. (Before, this call sat in the loop condition, so the whole report
+  // was rebuilt for every single line sent.)
+  int n = system_monitor_get_lines(buf, sizeof buf, lines, SYSMON_MAX_LINES);
+  for (int j = 0; j < n; j++) events.send(lines[j], "monitoringData", millis());
 }
 void armESC(AsyncWebServerRequest *request){
   // Goes through the same safety checks as the serial command (IMU alive, level).
@@ -363,9 +398,15 @@ void webApplication(void *pvParameters)
 
   for(;;){
 
+    // Always drain the queue, but only hand messages to the event source when a
+    // browser is connected and keeping up. Each SSE client buffers unsent messages
+    // on the heap; a stalled client (phone screen off, out of WiFi range) would
+    // otherwise sit on a full buffer until its connection times out.
     count = getFlightData(webQueue, 3);
-    for(int i = 0; i < count; i++) {
-      events.send(webQueue[i], "flightData", millis());
+    if (events.count() > 0 && events.avgPacketsWaiting() < 8) {
+      for(int i = 0; i < count; i++) {
+        events.send(webQueue[i], "flightData", millis());
+      }
     }
 
     if (millis() - lastAttachScan >= ATTACH_SCAN_MS) {
