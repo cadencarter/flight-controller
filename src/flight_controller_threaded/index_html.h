@@ -207,7 +207,7 @@ async function request(path, timeout = 2500) {
   const timer = setTimeout(() => ctl.abort(), timeout);
   try {
     const r = await fetch(path, {cache:"no-store", signal:ctl.signal});
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(t || "HTTP " + r.status); }
     return await r.text();
   } finally { clearTimeout(timer); }
 }
@@ -262,7 +262,7 @@ $("esc").addEventListener("click", async () => {
   escBusy = true; $("esc").setAttribute("aria-busy", "true"); $("esc-msg").textContent = "";
   setEsc(want); // flip right away so the animation feels instant
   try { await request(want ? "/esc/arm" : "/esc/disarm"); }
-  catch (_) { setEsc(!want); $("esc-msg").textContent = "Command unconfirmed. Switch left unchanged."; }
+  catch (e) { setEsc(!want); $("esc-msg").textContent = (e && e.name !== "AbortError" && e.message) ? e.message : "Command unconfirmed. Switch left unchanged."; }
   finally { escBusy = false; $("esc").removeAttribute("aria-busy"); controls(); }
 });
 function fmtUptime(s) {
@@ -297,11 +297,12 @@ const FLIGHT_STALE_MS = 2000;         // no message for this long = stream stall
 const MOTOR_PWM_MIN = 1000, MOTOR_PWM_MAX = 2000;                // ESC pulse range, µs
 const MOTOR_VECTOR_SCALE = 5, ARROW_MIN = 0.4, ARROW_MAX = 6;    // thrust arrow length, model units
 // Body frame: +Y is up and the front is -Z. Order must match the firmware's motor order.
+// Firmware sends "Motors: FL,FR,RL,RR" (microseconds).
 const MOTORS = [
-  {name: "M1", pos: "Front Right", color: "#cc3333", at: [ 5, 0, -5], spin:  1},
-  {name: "M2", pos: "Front Left",  color: "#33aa33", at: [-5, 0, -5], spin: -1},
-  {name: "M3", pos: "Rear Left",   color: "#3366cc", at: [-5, 0,  5], spin:  1},
-  {name: "M4", pos: "Rear Right",  color: "#ccaa00", at: [ 5, 0,  5], spin: -1},
+  {name: "FL", pos: "Front Left",  color: "#33aa33", at: [-5, 0, -5], spin: -1},
+  {name: "FR", pos: "Front Right", color: "#cc3333", at: [ 5, 0, -5], spin:  1},
+  {name: "RL", pos: "Rear Left",   color: "#3366cc", at: [-5, 0,  5], spin:  1},
+  {name: "RR", pos: "Rear Right",  color: "#ccaa00", at: [ 5, 0,  5], spin: -1},
 ];
 const flight = {
   q: [0, 0, 0, 1], gotQuat: false, calibrated: false, hasMotors: false, dirty: false, last: 0, raw: "", id: NaN, minOff: Infinity, lag: null, rate: 0,

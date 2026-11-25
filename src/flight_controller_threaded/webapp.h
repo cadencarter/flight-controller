@@ -194,7 +194,14 @@ AsyncWebServer server(80);
 AsyncEventSource events("/events");
 
 void handleRoot(AsyncWebServerRequest *request) { request->send_P(200, "text/html", PAGE); }
-static int getFlightData(char **queue, int max);
+
+// ---- Defined in flight_controller_threaded.ino ----
+#define FLIGHT_MSG_LEN 128   // must equal LOG_MSG_LEN (checked by static_assert there)
+static int getFlightData(char out[][FLIGHT_MSG_LEN], int max);
+extern volatile bool armed;
+bool requestArm();
+void requestDisarm(const char *why);
+const char *lastArmRefusal();
 
 // new below
 #define PRESS_MS 150 // try 100-300 if the lamp doesn't respond
@@ -229,9 +236,10 @@ void portentaHealth(AsyncWebServerRequest *request){
 
 
 void reboot(AsyncWebServerRequest *request){
-  char *args[] = { "reboot", NULL };
-  cmdReboot(1, args);
+  if (armed) { request->send(409, "text/plain", "Disarm before rebooting"); return; }
   request->send(200, "text/plain", "Rebooting");
+  delay(200);   // let the reply go out first
+  ESP.restart();
 }
 void systemStatus(){
   String temp_str = "temp: " + String(getTemp());
@@ -255,13 +263,12 @@ void systemStatus(){
     }
 }
 void armESC(AsyncWebServerRequest *request){
-  char *args[] = { "esc", "arm", NULL };
-  cmdESC(2, args);
-  request->send(200, "text/plain", "ARMED");
+  // Goes through the same safety checks as the serial command (IMU alive, level).
+  if (requestArm()) request->send(200, "text/plain", "ARMED");
+  else request->send(409, "text/plain", String("Arm refused: ") + lastArmRefusal());
 }
 void disarmESC(AsyncWebServerRequest *request){
-  char *args[] = { "esc", "disarm", NULL };
-  cmdESC(2, args);
+  requestDisarm("web");
   request->send(200, "text/plain", "DISARMED");
 }
 
@@ -307,11 +314,13 @@ void aiData(AsyncWebServerRequest *request){
 
 void webApplication(void *pvParameters)
 {
-  Serial.begin(115200);
-  pinMode(togglePin, OUTPUT);
-  digitalWrite(togglePin, LOW);
+  // togglePin 0 means "not configured". Don't drive GPIO0 (a boot strapping pin).
+  if (togglePin) {
+    pinMode(togglePin, OUTPUT);
+    digitalWrite(togglePin, LOW);
+  }
 
-  char *webQueue[4];
+  static char webQueue[3][FLIGHT_MSG_LEN];
   int count;
   static uint32_t lastRun = 0;
   static uint32_t lastAttachScan = 0;
@@ -354,7 +363,7 @@ void webApplication(void *pvParameters)
 
   for(;;){
 
-    count = getFlightData(webQueue, 2);
+    count = getFlightData(webQueue, 3);
     for(int i = 0; i < count; i++) {
       events.send(webQueue[i], "flightData", millis());
     }

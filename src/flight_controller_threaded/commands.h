@@ -12,6 +12,9 @@ constexpr int MAX_ARGS = 8;
 static void cmdThrottle(int argc, char **argv);
 static void cmdESC(int argc, char **argv);
 static void cmdDebug(int argc, char **argv);
+static void cmdImu(int argc, char **argv);
+static void cmdMotor(int argc, char **argv);
+static void cmdLevel(int argc, char **argv);
 static int getTemp();
 // ----------------------------- //
 
@@ -28,7 +31,9 @@ static void cmdStatus(int, char ** argv) {
   Serial.println(temp + " C");
 }
 
+extern volatile bool armed;
 static void cmdReboot(int, char **) {
+  if (armed) { Serial.print("disarm before rebooting\n"); return; }
   Serial.print("rebooting...\n");
   Serial.flush();               // wait for the UART to finish sending
   ESP.restart();
@@ -55,6 +60,9 @@ static const Command commands[] = {
   {"throttle",  "[up/down/set]",  "change throttle",           cmdThrottle},
   {"esc",       "[arm/disarm]",   "arm/disarm ESCs",           cmdESC},
   {"debug",     "[on/off]",       "enable/disable debugging",  cmdDebug},
+  {"imu",       "",               "show attitude + mixer (bench check)", cmdImu},
+  {"motor",     "[fl/fr/rl/rr]",  "spin one motor (PROPS OFF)", cmdMotor},
+  {"level",     "",               "capture level trim",        cmdLevel},
 };
 
 static void cmdHelp(int, char **) {
