@@ -44,7 +44,7 @@ static char *lines[SYSMON_MAX_LINES];
 #define ATTACHMENT_1_SENSE  17
 #define ATTACHMENT_2        12
 #define ATTACHMENT_2_SENSE  13
-uint8_t togglePin = 0;
+volatile uint8_t togglePin = 0;   // set from attachment detection (see updateTogglePin)
 bool ledState = false;
 
 #define ATTACH_TOLERANCE   100   // +/- ADC counts around each signature
@@ -274,6 +274,21 @@ static void heapWatch() {
   }
 }
 
+// Real arm state for the page, so it can't show "Disarmed" while the motors are live
+// (page reload, second phone) or "Armed" after a failsafe disarm.
+static void sendEscState() {
+  events.send(armed ? "ARMED" : "DISARMED", "escState", millis());
+}
+
+// The light is switched through the control pin of whichever port it is plugged into.
+static void updateTogglePin() {
+  uint8_t want = attachments[0] == ATT_LIGHT ? ATTACHMENT_1
+               : attachments[1] == ATT_LIGHT ? ATTACHMENT_2 : 0;
+  if (want == togglePin) return;
+  if (want) { pinMode(want, OUTPUT); digitalWrite(want, LOW); }
+  togglePin = want;
+}
+
 void systemStatus(){
   heapWatch();
   if (events.count() == 0) return;   // nobody listening: don't queue anything
@@ -288,6 +303,23 @@ void systemStatus(){
   events.send(msg, "groveHealth", millis());
   moduleStatus(msg, sizeof msg, "portenta", HM_PORTENTA);
   events.send(msg, "portentaHealth", millis());
+
+  // The page has a single "ai" slot: report whichever AI module was heard from last.
+  HealthModule ai = (modHealth[HM_PORTENTA].everSeen &&
+                     (!modHealth[HM_GROVE].everSeen ||
+                      (int32_t)(modHealth[HM_PORTENTA].lastSeen - modHealth[HM_GROVE].lastSeen) > 0))
+                    ? HM_PORTENTA : HM_GROVE;
+  moduleStatus(msg, sizeof msg, "ai", ai);
+  events.send(msg, "aiHealth", millis());
+
+  static uint32_t lastAiSent = 0;
+  if (aiDataMs && aiDataMs != lastAiSent) {
+    lastAiSent = aiDataMs;
+    snprintf(msg, sizeof msg, "dx: %.2f, dy: %.2f", (float)aiDeltaX, (float)aiDeltaY);
+    events.send(msg, "aiData", millis());
+  }
+
+  sendEscState();
 
   snprintf(msg, sizeof msg, "temp: %d", getTemp());
   events.send(msg, "temperature", millis());
@@ -382,8 +414,10 @@ void webApplication(void *pvParameters)
   server.on("/", handleRoot);
 
   // ---    Flight Control    --- //
-  server.on("/reboot", reboot);
-  server.on("/esc/arm", armESC);
+  // Arm and reboot are POST-only, so a browser prefetch, link preview or address-bar
+  // autocomplete of the URL can never arm the motors. Disarm accepts any method.
+  server.on("/reboot", HTTP_POST, reboot);
+  server.on("/esc/arm", HTTP_POST, armESC);
   server.on("/esc/disarm", disarmESC);
 
   // ---    Attachments       --- //
@@ -412,6 +446,13 @@ void webApplication(void *pvParameters)
     if (millis() - lastAttachScan >= ATTACH_SCAN_MS) {
       lastAttachScan = millis();
       checkAttachments();
+      updateTogglePin();
+    }
+
+    static bool lastArmed = false;
+    if (armed != lastArmed) {          // push arm/disarm (incl. failsafe) immediately
+      lastArmed = armed;
+      if (events.count() > 0) sendEscState();
     }
 
     if (millis() - lastRun >= 2500) {
