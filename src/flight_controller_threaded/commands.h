@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "mon_struts.h"
+#include "esp_heap_caps.h"
 
 constexpr int MAX_ARGS = 8;
 
@@ -20,15 +21,16 @@ static int getTemp();
 
 static void cmdHelp(int argc, char **argv);
 
-static void cmdStatus(int, char ** argv) {
-  String uptime = "uptime: " + String(millis()/1000);
-  String mem = "free heap: " + String(ESP.getFreeHeap());
-  String temp = "temp: " + String(getTemp());
-
+static void cmdStatus(int, char **) {
   Serial.println("-----------------------");
-  Serial.println(uptime + " s");
-  Serial.println(mem + " bytes");
-  Serial.println(temp + " C");
+  Serial.printf("uptime: %lu s\n", (unsigned long)(millis() / 1000));
+  // free: now. min: lowest ever since boot. largest: biggest single block that can
+  // still be allocated (shrinks with fragmentation even when free stays flat).
+  Serial.printf("heap free: %u  min: %u  largest block: %u bytes\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  Serial.printf("temp: %d C\n", getTemp());
 }
 
 extern volatile bool armed;
